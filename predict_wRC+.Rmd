@@ -1,0 +1,900 @@
+---
+title: "DS 340W Honors Option"
+author: "Malcolm Zerbe"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Front Matter
+
+```{r, warning=FALSE}
+# Load libraries
+suppressMessages({
+  library(tidyverse)
+  library(ggrepel)
+  library(ggcorrplot)
+  library(tidymodels)
+  library(xgboost)
+  library(vip)
+})
+```
+
+```{r}
+# Load data
+fg_2015_2023 <- read.csv("fangraphs-leaderboards.csv")
+ev_2023 <- read.csv("exit_velocity_2023.csv")
+ev_2022 <- read.csv("exit_velocity_2022.csv")
+ev_2021 <- read.csv("exit_velocity_2021.csv")
+ev_2020 <- read.csv("exit_velocity_2020.csv")
+ev_2019 <- read.csv("exit_velocity_2019.csv")
+ev_2018 <- read.csv("exit_velocity_2018.csv")
+ev_2017 <- read.csv("exit_velocity_2017.csv")
+ev_2016 <- read.csv("exit_velocity_2016.csv")
+ev_2015 <- read.csv("exit_velocity_2015.csv")
+xstats_2023 <- read.csv("expected_stats_2023.csv")
+xstats_2022 <- read.csv("expected_stats_2022.csv")
+xstats_2021 <- read.csv("expected_stats_2021.csv")
+xstats_2020 <- read.csv("expected_stats_2020.csv")
+xstats_2019 <- read.csv("expected_stats_2019.csv")
+xstats_2018 <- read.csv("expected_stats_2018.csv")
+xstats_2017 <- read.csv("expected_stats_2017.csv")
+xstats_2016 <- read.csv("expected_stats_2016.csv")
+xstats_2015 <- read.csv("expected_stats_2015.csv")
+```
+
+# Introduction
+
+My goal is to predict the future performance of Major League Baseball (MLB) players. MLB players can contribute to their teams in a variety of distinct ways, including batting, fielding, running, and pitching. This analysis will focus on batting alone. Baseball organizations and fans use a variety of hitting statistics to quantify offensive performance. These range from the primitive batting average (BA) and slugging percentage (SLG) to the more advanced weighted on-base average (wOBA) and weighted runs created plus (wRC+). This project will use wRC+ to define the success of a batter.
+
+wRC+ is an all-encompassing hitting metric that remedies the flaws of competing hitting statistics by (a) weighting each hit type according to its average value, (b) accounting for the value of walks, and (c) adjusting for the run environment of various ballparks. Additionally, wRC+ is easy to interpret with 100 being average and every integer above or below 100 representing a percentage better or worse than average, respectfully (i.e., 120 is 20% better than average, 85 is 15% worse than average). Lastly, this metric is directly comparable across different seasons unlike most other hitting metrics due to their varying league averages each season.
+
+I want to build a machine learning (ML) model to predict the wRC+ of MLB hitters in future seasons. To build a supervised ML model, a set of labeled data records structured in feature-output pairs is needed to attempt to learn the function between them. I will be trying to use 2 years worth of past performance to predict the future wRC+ of players with sufficient past playing time.
+
+*Future wRC+ ~ Past Performance*
+
+Using past performance metrics to predict future results seems like a plausible idea. For example, one might expect reigning MVP Ronald Acuna Jr. to have a much higher wRC+ in 2024 than most other hitters when looking at past performance. It would not make very much sense to simply predict the league average wRC+ for every player in the league because many players have demonstrated sustainable offensive skills that are more likely to repeat than not. While this method will never be perfect (projecting player performance is difficult), the results should provide enough signal to serve as a useful projection.
+
+There are many challenges I must overcome, such as collecting and wrangling data, avoiding common data science mistakes like overfitting, and ultimately creating a model that is worth deploying in a production environment. At the end of the process, I predicted that Yordan Alvarez will be the most productive hitter in the 2024 MLB season. Let's dive into how I formulated this prediction.
+
+# Data Sources
+
+First, I collected data to train and evaluate models. All data comes from FanGraphs and Baseball Savant, two of the most popular sources for baseball statistics.
+
+```{r}
+# View FanGraphs data
+glimpse(fg_2015_2023)
+```
+FanGraphs provides many essential metrics, including the target variable wRC+. Each observation represents a specific player in a specific season dating back to 2015. The data contains standard, more commonly used offensive metrics like batting average and slugging percentage, player tendencies like swing percentage and contact percentage, and more. I suspect that several of these metrics will play a crucial role in predicting future wRC+. 
+
+```{r}
+# View batted ball information from Baseball Savant
+glimpse(ev_2023)
+
+# View expected statistics from Baseball Savant
+glimpse(xstats_2023)
+```
+
+The data from Baseball Savant is structured in a similar way, with each observation representing a player in a season. This data could not be downloaded across multiple seasons, so a separate file exists for every season. Baseball Savant contains metrics that can only be calculated with MLB's HawkEye technology. Some of the most notable offensive metrics contained in this data source are expected batting average (xBA), expected slugging percentage (xSLG), and expected weighted on-base average (xwOBA). These statistics were designed to isolate the skill of batters independent of luck, considering only exit velocity and launch angle and not the end result of balls-in-play. I suspect that xwOBA will be the most predictive statistic for future wRC+.
+
+# Data Wrangling
+
+The data from FanGraphs and Baseball Savant share a common column. Let's merge these two data sources so that we can utilize both suites of metrics.
+
+```{r}
+# Combine Baseball Savant data
+bs_2023 <- left_join(x = ev_2023, y = xstats_2023, by = c("player_id", "last_name..first_name"))
+bs_2022 <- left_join(x = ev_2022, y = xstats_2022, by = c("player_id", "last_name..first_name"))
+bs_2021 <- left_join(x = ev_2021, y = xstats_2021, by = c("player_id", "last_name..first_name"))
+bs_2020 <- left_join(x = ev_2020, y = xstats_2020, by = c("player_id", "last_name..first_name"))
+bs_2019 <- left_join(x = ev_2019, y = xstats_2019, by = c("player_id", "last_name..first_name"))
+bs_2018 <- left_join(x = ev_2018, y = xstats_2018, by = c("player_id", "last_name..first_name"))
+bs_2017 <- left_join(x = ev_2017, y = xstats_2017, by = c("player_id", "last_name..first_name"))
+bs_2016 <- left_join(x = ev_2016, y = xstats_2016, by = c("player_id", "last_name..first_name"))
+bs_2015 <- left_join(x = ev_2015, y = xstats_2015, by = c("player_id", "last_name..first_name"))
+
+# Split FanGraphs data up by season
+fg_2023 <- fg_2015_2023 %>% filter(Season == 2023)
+fg_2022 <- fg_2015_2023 %>% filter(Season == 2022)
+fg_2021 <- fg_2015_2023 %>% filter(Season == 2021)
+fg_2020 <- fg_2015_2023 %>% filter(Season == 2020)
+fg_2019 <- fg_2015_2023 %>% filter(Season == 2019)
+fg_2018 <- fg_2015_2023 %>% filter(Season == 2018)
+fg_2017 <- fg_2015_2023 %>% filter(Season == 2017)
+fg_2016 <- fg_2015_2023 %>% filter(Season == 2016)
+fg_2015 <- fg_2015_2023 %>% filter(Season == 2015)
+
+# Merge sources
+vars_to_remove <- c("Team", "AVG", "OBP", "SLG", "OPS", "BB_Rate", "K_Rate", "Pull_Rate", "Cent_Rate", "Oppo_Rate", "GB_Rate", "NameASCII", "last_name..first_name", "attempts", "year", "pa", "bip", "ba", "slg", "woba", "ev95plus", "barrels", "est_ba_minus_ba", "est_slg_minus_slg", "est_woba_minus_woba", "est_ba_minus_ba_diff", "est_slg_minus_slg_diff", "est_woba_minus_woba_diff")
+
+batting_2023 <- left_join(fg_2023, bs_2023, by = c("MLBAMID" = "player_id")) %>% select(PlayerId, MLBAMID, Name, everything(), -any_of(vars_to_remove))
+batting_2022 <- left_join(fg_2022, bs_2022, by = c("MLBAMID" = "player_id")) %>% select(PlayerId, MLBAMID, Name, everything(), -any_of(vars_to_remove))
+batting_2021 <- left_join(fg_2021, bs_2021, by = c("MLBAMID" = "player_id")) %>% select(PlayerId, MLBAMID, Name, everything(), -any_of(vars_to_remove))
+batting_2020 <- left_join(fg_2020, bs_2020, by = c("MLBAMID" = "player_id")) %>% select(PlayerId, MLBAMID, Name, everything(), -any_of(vars_to_remove))
+batting_2019 <- left_join(fg_2019, bs_2019, by = c("MLBAMID" = "player_id")) %>% select(PlayerId, MLBAMID, Name, everything(), -any_of(vars_to_remove))
+batting_2018 <- left_join(fg_2018, bs_2018, by = c("MLBAMID" = "player_id")) %>% select(PlayerId, MLBAMID, Name, everything(), -any_of(vars_to_remove))
+batting_2017 <- left_join(fg_2017, bs_2017, by = c("MLBAMID" = "player_id")) %>% select(PlayerId, MLBAMID, Name, everything(), -any_of(vars_to_remove))
+batting_2016 <- left_join(fg_2016, bs_2016, by = c("MLBAMID" = "player_id")) %>% select(PlayerId, MLBAMID, Name, everything(), -any_of(vars_to_remove))
+batting_2015 <- left_join(fg_2015, bs_2015, by = c("MLBAMID" = "player_id")) %>% select(PlayerId, MLBAMID, Name, everything(), -any_of(vars_to_remove))
+
+glimpse(batting_2023)
+```
+
+After joining all of the metrics together, a few metrics need to be converted onto a scale that accounts for the league average that season. This is already done for us for the majority of the statistics, but must be done manually for xBA, xSLG, xwOBA, and wOBA. This proves to be a relatively easy fix because the MLB provides the league averages of each metric, which are inputted into a data frame below.
+
+```{r}
+# Make a data frame of the league average for each metric since 2015
+league_avgs <- data.frame(
+  year = 2023:2015,
+  lg_est_ba = c(0.248, 0.240, 0.242, 0.245, 0.247, 0.242, 0.249, 0.248, 0.245),
+  lg_est_slg = c(0.413, 0.388, 0.407, 0.415, 0.424, 0.399, 0.415, 0.406, 0.390),
+  lg_est_woba = c(0.320, 0.309, 0.317, 0.323, 0.319, 0.313, 0.318, 0.315, 0.310),
+  lg_wOBA = c(0.318, 0.310, 0.319, 0.320, 0.325, 0.320, 0.326, 0.323, 0.318))
+
+print(league_avgs)
+```
+
+By dividing a player's value for a metric by the league average for that metric and multiplying by 100, one can adjust a metric to the league average. Let's go ahead and do that for xBA, xSLG, xwOBA, and wOBA.
+
+```{r}
+# Join league averages for each metric
+batting_2023 <- left_join(batting_2023, league_avgs, by = c("Season" = "year"))
+batting_2022 <- left_join(batting_2022, league_avgs, by = c("Season" = "year"))
+batting_2021 <- left_join(batting_2021, league_avgs, by = c("Season" = "year"))
+batting_2020 <- left_join(batting_2020, league_avgs, by = c("Season" = "year"))
+batting_2019 <- left_join(batting_2019, league_avgs, by = c("Season" = "year"))
+batting_2018 <- left_join(batting_2018, league_avgs, by = c("Season" = "year"))
+batting_2017 <- left_join(batting_2017, league_avgs, by = c("Season" = "year"))
+batting_2016 <- left_join(batting_2016, league_avgs, by = c("Season" = "year"))
+batting_2015 <- left_join(batting_2015, league_avgs, by = c("Season" = "year"))
+
+# Convert wOBA, xBA, xSLG, and xwOBA to Plus scale and calculate Z-O Swing%
+batting_2023 <- batting_2023 %>% mutate(est_ba_plus = 100 * (est_ba / lg_est_ba), est_slg_plus = 100 * (est_slg / lg_est_slg), est_woba_plus = 100 * (est_woba / lg_est_woba), wOBA_Plus = 100 * (wOBA / lg_wOBA), Z_O_Swing_Rate = Z_Swing_Rate - O_Swing_Rate) %>% select(-est_ba, -lg_est_ba, -est_slg, -lg_est_slg, -est_woba, -lg_est_woba,-wOBA, -lg_wOBA)
+
+batting_2022 <- batting_2022 %>% mutate(est_ba_plus = 100 * (est_ba / lg_est_ba), est_slg_plus = 100 * (est_slg / lg_est_slg), est_woba_plus = 100 * (est_woba / lg_est_woba), wOBA_Plus = 100 * (wOBA / lg_wOBA), Z_O_Swing_Rate = Z_Swing_Rate - O_Swing_Rate) %>% select(-est_ba, -lg_est_ba, -est_slg, -lg_est_slg, -est_woba, -lg_est_woba,-wOBA, -lg_wOBA)
+
+batting_2021 <- batting_2021 %>% mutate(est_ba_plus = 100 * (est_ba / lg_est_ba), est_slg_plus = 100 * (est_slg / lg_est_slg), est_woba_plus = 100 * (est_woba / lg_est_woba), wOBA_Plus = 100 * (wOBA / lg_wOBA), Z_O_Swing_Rate = Z_Swing_Rate - O_Swing_Rate) %>% select(-est_ba, -lg_est_ba, -est_slg, -lg_est_slg, -est_woba, -lg_est_woba,-wOBA, -lg_wOBA)
+
+batting_2020 <- batting_2020 %>% mutate(est_ba_plus = 100 * (est_ba / lg_est_ba), est_slg_plus = 100 * (est_slg / lg_est_slg), est_woba_plus = 100 * (est_woba / lg_est_woba), wOBA_Plus = 100 * (wOBA / lg_wOBA), Z_O_Swing_Rate = Z_Swing_Rate - O_Swing_Rate) %>% select(-est_ba, -lg_est_ba, -est_slg, -lg_est_slg, -est_woba, -lg_est_woba,-wOBA, -lg_wOBA)
+
+batting_2019 <- batting_2019 %>% mutate(est_ba_plus = 100 * (est_ba / lg_est_ba), est_slg_plus = 100 * (est_slg / lg_est_slg), est_woba_plus = 100 * (est_woba / lg_est_woba), wOBA_Plus = 100 * (wOBA / lg_wOBA), Z_O_Swing_Rate = Z_Swing_Rate - O_Swing_Rate) %>% select(-est_ba, -lg_est_ba, -est_slg, -lg_est_slg, -est_woba, -lg_est_woba,-wOBA, -lg_wOBA)
+
+batting_2018 <- batting_2018 %>% mutate(est_ba_plus = 100 * (est_ba / lg_est_ba), est_slg_plus = 100 * (est_slg / lg_est_slg), est_woba_plus = 100 * (est_woba / lg_est_woba), wOBA_Plus = 100 * (wOBA / lg_wOBA), Z_O_Swing_Rate = Z_Swing_Rate - O_Swing_Rate) %>% select(-est_ba, -lg_est_ba, -est_slg, -lg_est_slg, -est_woba, -lg_est_woba,-wOBA, -lg_wOBA)
+
+batting_2017 <- batting_2017 %>% mutate(est_ba_plus = 100 * (est_ba / lg_est_ba), est_slg_plus = 100 * (est_slg / lg_est_slg), est_woba_plus = 100 * (est_woba / lg_est_woba), wOBA_Plus = 100 * (wOBA / lg_wOBA), Z_O_Swing_Rate = Z_Swing_Rate - O_Swing_Rate) %>% select(-est_ba, -lg_est_ba, -est_slg, -lg_est_slg, -est_woba, -lg_est_woba,-wOBA, -lg_wOBA)
+
+batting_2016 <- batting_2016 %>% mutate(est_ba_plus = 100 * (est_ba / lg_est_ba), est_slg_plus = 100 * (est_slg / lg_est_slg), est_woba_plus = 100 * (est_woba / lg_est_woba), wOBA_Plus = 100 * (wOBA / lg_wOBA), Z_O_Swing_Rate = Z_Swing_Rate - O_Swing_Rate) %>% select(-est_ba, -lg_est_ba, -est_slg, -lg_est_slg, -est_woba, -lg_est_woba,-wOBA, -lg_wOBA)
+
+batting_2015 <- batting_2015 %>% mutate(est_ba_plus = 100 * (est_ba / lg_est_ba), est_slg_plus = 100 * (est_slg / lg_est_slg), est_woba_plus = 100 * (est_woba / lg_est_woba), wOBA_Plus = 100 * (wOBA / lg_wOBA), Z_O_Swing_Rate = Z_Swing_Rate - O_Swing_Rate) %>% select(-est_ba, -lg_est_ba, -est_slg, -lg_est_slg, -est_woba, -lg_est_woba,-wOBA, -lg_wOBA)
+```
+
+To wrap up the data wrangling portion of this project, I need to structure the data so that the features consist of past year metrics and the output label, future wRC+, is derived from the following season. It is important to not include, for any given row, information about the batter that came after or during the season of interest as this could cause severe data leakage. The use case of this model is predicting offensive results before the season even starts, so the model must be trained accordingly. I will also keep track of future plate appearances (PA) as this may be important for error metric calculations later.
+
+With the data separated by individual seasons, I will merge previous seasons of metrics on to the following year's wRC+. We will include 2 years worth of previous information.
+
+```{r}
+# Restructure data
+predict_2023 <- batting_2023 %>% rename(Season_future = Season, wRC_Plus_future = wRC_Plus, PA_future = PA) %>% select(PlayerId, MLBAMID, Name, Season_future, wRC_Plus_future, PA_future) %>%
+  left_join(batting_2022 %>% rename_with(~paste0(., "_past1"), -(1:3)), by = c("PlayerId", "MLBAMID", "Name")) %>%
+  left_join(batting_2021 %>% rename_with(~paste0(., "_past2"), -(1:3)), by = c("PlayerId", "MLBAMID", "Name"))
+
+predict_2022 <- batting_2022 %>% rename(Season_future = Season, wRC_Plus_future = wRC_Plus, PA_future = PA) %>% select(PlayerId, MLBAMID, Name, Season_future, wRC_Plus_future, PA_future) %>%
+  left_join(batting_2021 %>% rename_with(~paste0(., "_past1"), -(1:3)), by = c("PlayerId", "MLBAMID", "Name")) %>%
+  left_join(batting_2020 %>% rename_with(~paste0(., "_past2"), -(1:3)), by = c("PlayerId", "MLBAMID", "Name"))
+
+predict_2021 <- batting_2021 %>% rename(Season_future = Season, wRC_Plus_future = wRC_Plus, PA_future = PA) %>% select(PlayerId, MLBAMID, Name, Season_future, wRC_Plus_future, PA_future) %>%
+  left_join(batting_2020 %>% rename_with(~paste0(., "_past1"), -(1:3)), by = c("PlayerId", "MLBAMID", "Name")) %>%
+  left_join(batting_2019 %>% rename_with(~paste0(., "_past2"), -(1:3)), by = c("PlayerId", "MLBAMID", "Name"))
+
+predict_2020 <- batting_2020 %>% rename(Season_future = Season, wRC_Plus_future = wRC_Plus, PA_future = PA) %>% select(PlayerId, MLBAMID, Name, Season_future, wRC_Plus_future, PA_future) %>%
+  left_join(batting_2019 %>% rename_with(~paste0(., "_past1"), -(1:3)), by = c("PlayerId", "MLBAMID", "Name")) %>%
+  left_join(batting_2018 %>% rename_with(~paste0(., "_past2"), -(1:3)), by = c("PlayerId", "MLBAMID", "Name"))
+
+predict_2019 <- batting_2019 %>% rename(Season_future = Season, wRC_Plus_future = wRC_Plus, PA_future = PA) %>% select(PlayerId, MLBAMID, Name, Season_future, wRC_Plus_future, PA_future) %>%
+  left_join(batting_2018 %>% rename_with(~paste0(., "_past1"), -(1:3)), by = c("PlayerId", "MLBAMID", "Name")) %>%
+  left_join(batting_2017 %>% rename_with(~paste0(., "_past2"), -(1:3)), by = c("PlayerId", "MLBAMID", "Name"))
+
+predict_2018 <- batting_2018 %>% rename(Season_future = Season, wRC_Plus_future = wRC_Plus, PA_future = PA) %>% select(PlayerId, MLBAMID, Name, Season_future, wRC_Plus_future, PA_future) %>%
+  left_join(batting_2017 %>% rename_with(~paste0(., "_past1"), -(1:3)), by = c("PlayerId", "MLBAMID", "Name")) %>%
+  left_join(batting_2016 %>% rename_with(~paste0(., "_past2"), -(1:3)), by = c("PlayerId", "MLBAMID", "Name"))
+
+predict_2017 <- batting_2017 %>% rename(Season_future = Season, wRC_Plus_future = wRC_Plus, PA_future = PA) %>% select(PlayerId, MLBAMID, Name, Season_future, wRC_Plus_future, PA_future) %>%
+  left_join(batting_2016 %>% rename_with(~paste0(., "_past1"), -(1:3)), by = c("PlayerId", "MLBAMID", "Name")) %>%
+  left_join(batting_2015 %>% rename_with(~paste0(., "_past2"), -(1:3)), by = c("PlayerId", "MLBAMID", "Name"))
+
+predict_batting <- rbind(predict_2023, predict_2022)
+predict_batting <- rbind(predict_batting, predict_2021)
+predict_batting <- rbind(predict_batting, predict_2020)
+predict_batting <- rbind(predict_batting, predict_2019)
+predict_batting <- rbind(predict_batting, predict_2018)
+predict_batting <- rbind(predict_batting, predict_2017)
+
+predict_batting <- predict_batting %>% mutate(ID = row_number()) %>% select(ID, everything(), -Season_past1, -Season_past2)
+```
+
+Taking a look at the newly merged data frame, we can see the wRC_Plus_future target variable being associated with offensive metrics from the previous 2 seasons, denoted by "_past1" and "_past2", respectively.
+
+```{r}
+glimpse(predict_batting)
+```
+
+# Feature Engineering
+
+While these features may provide signal as they stand, let's calculate a simple 2-year average for these metrics.
+
+```{r}
+# Function for average of each metric over past 2 seasons
+get_2year_mean <- function(metric_past1, PA_past1, metric_past2, PA_past2) {
+  
+  total_PA_past <- numeric(length = length(PA_past1))
+  weighted_metric <- numeric(length = length(PA_past1))
+  
+  non_na1 <- !is.na(metric_past1) & !is.na(PA_past1)
+  total_PA_past[non_na1] <- total_PA_past[non_na1] + PA_past1[non_na1]
+  weighted_metric[non_na1] <- weighted_metric[non_na1] + (metric_past1[non_na1] * PA_past1[non_na1])
+  
+  non_na2 <- !is.na(metric_past2) & !is.na(PA_past2)
+  total_PA_past[non_na2] <- total_PA_past[non_na2] + PA_past2[non_na2]
+  weighted_metric[non_na2] <- weighted_metric[non_na2] + (metric_past2[non_na2] * PA_past2[non_na2])
+  
+  avg_metric <- ifelse(total_PA_past > 0, weighted_metric / total_PA_past, NA)
+  
+  return(avg_metric)
+} 
+
+# Calculate 2 year averages for each metric
+predict_batting <- predict_batting %>%
+  mutate(AVG_Plus_2YrAvg = get_2year_mean(AVG_Plus_past1, PA_past1, AVG_Plus_past2, PA_past2),
+         OBP_Plus_2YrAvg = get_2year_mean(OBP_Plus_past1, PA_past1, OBP_Plus_past2, PA_past2),
+         SLG_Plus_2YrAvg = get_2year_mean(SLG_Plus_past1, PA_past1, SLG_Plus_past2, PA_past2),
+         BB_Rate_Plus_2YrAvg = get_2year_mean(BB_Rate_Plus_past1, PA_past1, BB_Rate_Plus_past2, PA_past2),
+         K_Rate_Plus_2YrAvg = get_2year_mean(K_Rate_Plus_past1, PA_past1, K_Rate_Plus_past2, PA_past2),
+         wRC_Plus_2YrAvg = get_2year_mean(wRC_Plus_past1, PA_past1, wRC_Plus_past2, PA_past2),
+         O_Swing_Rate_2YrAvg = get_2year_mean(O_Swing_Rate_past1, PA_past1, O_Swing_Rate_past2, PA_past2),
+         Z_Swing_Rate_2YrAvg = get_2year_mean(Z_Swing_Rate_past1, PA_past1, Z_Swing_Rate_past2, PA_past2),
+         Swing_Rate_2YrAvg = get_2year_mean(Swing_Rate_past1, PA_past1, Swing_Rate_past2, PA_past2),
+         O_Contact_Rate_2YrAvg = get_2year_mean(O_Contact_Rate_past1, PA_past1, O_Contact_Rate_past2, PA_past2),
+         Z_Contact_Rate_2YrAvg = get_2year_mean(Z_Contact_Rate_past1, PA_past1, Z_Contact_Rate_past2, PA_past2),
+         Contact_Rate_2YrAvg = get_2year_mean(Contact_Rate_past1, PA_past1, Contact_Rate_past2, PA_past2),
+         Pull_Rate_Plus_2YrAvg = get_2year_mean(Pull_Rate_Plus_past1, PA_past1, Pull_Rate_Plus_past2, PA_past2),
+         Cent_Rate_Plus_2YrAvg = get_2year_mean(Cent_Rate_Plus_past1, PA_past1, Cent_Rate_Plus_past2, PA_past2),
+         Oppo_Rate_Plus_2YrAvg = get_2year_mean(Oppo_Rate_Plus_past1, PA_past1, Oppo_Rate_Plus_past2, PA_past2),
+         GB_Rate_Plus_2YrAvg = get_2year_mean(GB_Rate_Plus_past1, PA_past1, GB_Rate_Plus_past2, PA_past2),
+         avg_hit_angle_2YrAvg = get_2year_mean(avg_hit_angle_past1, PA_past1, avg_hit_angle_past2, PA_past2),
+         anglesweetspotpercent_2YrAvg = get_2year_mean(anglesweetspotpercent_past1, PA_past1, anglesweetspotpercent_past2, PA_past2),
+         max_hit_speed_2YrAvg = get_2year_mean(max_hit_speed_past1, PA_past1, max_hit_speed_past2, PA_past2),
+         avg_hit_speed_2YrAvg = get_2year_mean(avg_hit_speed_past1, PA_past1, avg_hit_speed_past2, PA_past2),
+         ev50_2YrAvg = get_2year_mean(ev50_past1, PA_past1, ev50_past2, PA_past2),
+         fbld_2YrAvg = get_2year_mean(fbld_past1, PA_past1, fbld_past2, PA_past2),
+         gb_2YrAvg = get_2year_mean(gb_past1, PA_past1, gb_past2, PA_past2),
+         max_distance_2YrAvg = get_2year_mean(max_distance_past1, PA_past1, max_distance_past2, PA_past2),
+         avg_distance_2YrAvg = get_2year_mean(avg_distance_past1, PA_past1, avg_distance_past2, PA_past2),
+         avg_hr_distance_2YrAvg = get_2year_mean(avg_hr_distance_past1, PA_past1, avg_hr_distance_past2, PA_past2),
+         ev95percent_2YrAvg = get_2year_mean(ev95percent_past1, PA_past1, ev95percent_past2, PA_past2),
+         brl_percent_2YrAvg = get_2year_mean(brl_percent_past1, PA_past1, brl_percent_past2, PA_past2),
+         brl_pa_2YrAvg = get_2year_mean(brl_pa_past1, PA_past1, brl_pa_past2, PA_past2),
+         est_ba_plus_2YrAvg = get_2year_mean(est_ba_plus_past1, PA_past1, est_ba_plus_past2, PA_past2),
+         est_slg_plus_2YrAvg = get_2year_mean(est_slg_plus_past1, PA_past1, est_slg_plus_past2, PA_past2),
+         est_woba_plus_2YrAvg = get_2year_mean(est_woba_plus_past1, PA_past1, est_woba_plus_past2, PA_past2),
+         wOBA_Plus_2YrAvg = get_2year_mean(wOBA_Plus_past1, PA_past1, wOBA_Plus_past2, PA_past2),
+         Z_O_Swing_Rate_2YrAvg = get_2year_mean(Z_O_Swing_Rate_past1, PA_past1, Z_O_Swing_Rate_past2, PA_past2),
+         PA_past1 = ifelse(is.na(PA_past1), 0, PA_past1), PA_past2 = ifelse(is.na(PA_past2), 0, PA_past2), 
+         PA_past_total = PA_past1 + PA_past2)
+```
+
+I suspect that many of these features, like wRC+, wOBA, and OPS, will all be incredibly similar to one another, providing similar and redundant predictive information. In such cases, it's possible that inclusion of many similar variables is not beneficial, or maybe even harmful, and that selecting a subset of them or even combining them would work better. It's very possible that they all provide very similar information, and that including just one of them in modeling is as good as including all three.
+
+PCA is a procedure used to take a seemingly high-dimensional feature space to a lower dimensional (less total features) by combining the existing features into uncorrelated principal components that explain the variance of the data. A common downside of performing PCA is that a lot of interpretability and inferential powers are lost. For example, "Principal Component 1" is a lot harder to interpret than "batting average". However, because we are far more interested in predictive accuracy than inference, running PCA is worth trying.
+
+```{r}
+# Standardize the data
+df <- predict_batting %>%
+  select(-PlayerId, -MLBAMID, -Name, -Season_future, -wRC_Plus_future, -PA_future) %>%
+  drop_na()
+
+# Separate ID and features
+id_column <- df$ID
+features <- df %>% select(-ID)  # Exclude ID column for PCA
+
+# Standardize the features
+features_standardized <- scale(features[, sapply(features, is.numeric)])
+
+# Apply PCA
+pca_result <- prcomp(features_standardized, center = TRUE, scale. = TRUE)
+
+# Save PCA model so it can be applied to new data
+saveRDS(pca_result, "pca_model.rds")
+
+# Decide the number of components to retain and create PCA features dataframe
+pca_features <- pca_result$x[, 1:3]  # Adjust the number of components as needed
+df_pca <- as.data.frame(pca_features)
+
+# Add the ID column back to the PCA features dataframe
+df_pca$ID <- id_column
+
+# Merge PCA features with the original dataframe
+predict_batting_master <- merge(predict_batting, df_pca, by = "ID")
+```
+
+PCA has been applied to our data and we've extracted 3 principal components, which will be explored further in the next section.
+
+# Exploratory Data Analysis
+
+Before moving on with exploratory data analysis, we must filter the data for only players with sufficient past playing time. The majority of the removed observations will be rookies. Until minor league data becomes publicly available, it will be especially hard to generate projections for these players. For now, we will simply create a model that is only meant to be applied to players that have already played a bit in the majors (min. 400 PA).
+
+Additionally, we will be filtering for observations with at least 200 PA in the future season, or the season we are predicting wRC+ for. I don't want to punish models for being drastically wrong when a player simply didn't play enough to accumulate a descriptive, accurate wRC+. For example, if we projected a player to have a 100 wRC+ and he wound up with a 200 wRC+ in only 10 plate appearances, it is very likely that this player simply benefited from very limited playing time and that the model may not have been as wrong as any error metric would suggest.
+
+```{r}
+# Filter for players with significant playing time
+predict_batting_qualified <- predict_batting_master %>%
+  filter(PA_past_total > 400, PA_future > 200)
+```
+
+It's time to start investigating some of these features, their relationships to future wRC+, and their relationships among themselves. Let's begin by looking at metrics from the season prior alone (past1), 2 seasons prior (past2), and the average of the season prior and 2 seasons prior (2YrAvg) separately. We will be testing their "predictiveness", or their correlation to future on-field results in the form of wRC+. 
+
+```{r}
+# Correlations between past season performance and future performance
+last_year <- predict_batting_qualified %>% 
+  select(ends_with("_past1"), wRC_Plus_future)
+
+last_year_corrs <- last_year %>%
+  cor(use = "complete.obs") %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "feature") %>%
+  filter(feature != "wRC_Plus_future") %>%
+  mutate(correlation = round(wRC_Plus_future, 2)) %>%
+  select(feature, correlation) %>%
+  arrange(desc(abs(correlation)))
+
+print(last_year_corrs)
+
+# Correlations between 2 seasons ago performance and future performance
+two_years_ago <- predict_batting_qualified %>% 
+  select(ends_with("_past2"), wRC_Plus_future)
+
+two_years_ago_corrs <- two_years_ago %>%
+  cor(use = "complete.obs") %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "feature") %>%
+  filter(feature != "wRC_Plus_future") %>%
+  mutate(correlation = round(wRC_Plus_future, 2)) %>%
+  select(feature, correlation) %>%
+  arrange(desc(abs(correlation)))
+
+print(two_years_ago_corrs)
+
+# Correlations between average performance in last 2 seasons and future performance
+two_yr_avg <- predict_batting_qualified %>% 
+  select(ends_with("_2YrAvg"), wRC_Plus_future)
+
+two_yr_avg_corrs <- two_yr_avg %>%
+  cor(use = "complete.obs") %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "feature") %>%
+  filter(feature != "wRC_Plus_future") %>%
+  mutate(correlation = round(wRC_Plus_future, 2)) %>%
+  select(feature, correlation) %>%
+  arrange(desc(abs(correlation)))
+
+print(two_yr_avg_corrs)
+
+# Correlations between all features and future performance
+all_features <- predict_batting_qualified %>% 
+  select(ends_with("_past1"), ends_with("_past2"), ends_with("_2YrAvg"), PC1, PC2, PC3, wRC_Plus_future)
+
+all_corrs <- all_features %>%
+  cor(use = "complete.obs") %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "feature") %>%
+  filter(feature != "wRC_Plus_future") %>%
+  mutate(correlation = round(wRC_Plus_future, 2)) %>%
+  select(feature, correlation) %>%
+  arrange(desc(abs(correlation)))
+
+print(all_corrs)
+```
+
+Unsurprisingly, information from 1 season ago appears to be more valuable for predicting future performance than information from 2 seasons ago. This intuitvely makes sense. It also turns out that averaging production from the past 2 seasons appears to be more correlated with future success than merely using production from last season. Overall, the 2 year average of past xwOBA+ is the most correlated with future wRC+ with a correlation of about 0.52. Let's take a closer look at this relationship.
+
+```{r}
+ggplot(data = predict_batting_qualified, mapping = aes(x = est_woba_plus_2YrAvg, y = wRC_Plus_future)) +
+  geom_point(size = 3, alpha = 0.5, color = "skyblue") +
+  xlab("Past xwOBA+ (2 Year Average)") + ylab("Future wRC+") +
+  theme_minimal() +
+  theme(legend.text = element_text(size = 16, face = "bold"), legend.title = element_blank(),
+        axis.text.x = element_text(size = 16), axis.title.x = element_text(size = 16, face = "bold"),
+        axis.text.y = element_text(size = 16), axis.title.y = element_text(size = 16, face = "bold"),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+ggplot(data = predict_batting_qualified, mapping = aes(x = est_woba_plus_2YrAvg, y = wRC_Plus_future)) +
+  geom_point(size = 3, alpha = 0.5, color = "skyblue") +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  xlab("Past xwOBA+ (2 Year Average)") + ylab("Future wRC+") +
+  theme_minimal() +
+  theme(legend.text = element_text(size = 16, face = "bold"), legend.title = element_blank(),
+        axis.text.x = element_text(size = 16), axis.title.x = element_text(size = 16, face = "bold"),
+        axis.text.y = element_text(size = 16), axis.title.y = element_text(size = 16, face = "bold"),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+```
+
+There is a moderately strong, linear relationship between past xwOBA+ (2 Year Average) and future wRC+. As past xwOBA+ increases, future wRC+ tends to also increase. I believe that this metric will be the most influential feature in the future wRC+ projection models.
+
+Now we will explore multicollinearity, or the possibility of relationships between the features themselves. As mentioned before completing PCA, I theorized that many of the covariates would be heavily correlated with one another. I will now take a look at the correlations between some of the most promising features.
+
+```{r}
+vars <- predict_batting_qualified %>%
+  select(est_woba_plus_2YrAvg, wRC_Plus_2YrAvg, wOBA_Plus_2YrAvg, est_slg_plus_2YrAvg, est_woba_plus_past1, PC1, wRC_Plus_future) %>%
+  rename(`xwOBA+ (2YrAvg)` = est_woba_plus_2YrAvg, `wRC+ (2YrAvg)` = wRC_Plus_2YrAvg, `wOBA+ (2YrAvg)` = wOBA_Plus_2YrAvg, `xSLG+ (2YrAvg)` = est_slg_plus_2YrAvg, `xwOBA+ (Past1)` = est_woba_plus_past1, `wRC+ (Future)` = wRC_Plus_future)
+
+cor_matrix <- cor(vars)
+
+desired_order <- c("wRC+ (Future)", "wRC+ (2YrAvg)", "wOBA+ (2YrAvg)", "xwOBA+ (2YrAvg)", "xSLG+ (2YrAvg)", "xwOBA+ (Past1)", "PC1")
+
+cor_matrix_ordered <- cor_matrix[desired_order, desired_order]
+
+ggcorrplot(cor_matrix_ordered, type = "lower", colors = c("royalblue3", "#FFFFFF", "red"), lab = TRUE) +
+  theme(plot.title = element_text(face = "bold"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+```
+
+As expected, these metrics share extremely high correlations with one another. Because of this, it's unlikely that all of them are needed to train a model. Principal Component 1 seems to summarise the information contained within most of the most predictive hitting metrics.
+
+```{r}
+vars <- predict_batting_qualified %>%
+  select(PC1, PC2, PC3, wRC_Plus_future) %>%
+  rename(`wRC+ (Future)` = wRC_Plus_future)
+
+cor_matrix <- cor(vars)
+
+desired_order <- c("wRC+ (Future)", "PC1", "PC2", "PC3")
+
+cor_matrix_ordered <- cor_matrix[desired_order, desired_order]
+
+ggcorrplot(cor_matrix_ordered, type = "lower", colors = c("royalblue3", "#FFFFFF", "red"), lab = TRUE) +
+  theme(plot.title = element_text(face = "bold"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+```
+
+PC1 shares a similar correlation with future wRC+ (in magnitude) to xwOBA+, wRC+, and xSLG+. PC2 and PC3 appear to summarise less useful information, but perhaps would still be useful as model inputs when combined with PC1. Let's take a visual look at the relationship between PC1 and future wRC+.
+
+```{r}
+ggplot(data = predict_batting_qualified, mapping = aes(x = PC1, y = wRC_Plus_future)) +
+  geom_point(size = 3, alpha = 0.5, color = "skyblue") +
+  xlab("PC1") + ylab("Future wRC+") +
+  theme_minimal() +
+  theme(legend.text = element_text(size = 16, face = "bold"), legend.title = element_blank(),
+        axis.text.x = element_text(size = 16), axis.title.x = element_text(size = 16, face = "bold"),
+        axis.text.y = element_text(size = 16), axis.title.y = element_text(size = 16, face = "bold"),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+ggplot(data = predict_batting_qualified, mapping = aes(x = PC1, y = wRC_Plus_future)) +
+  geom_point(size = 3, alpha = 0.5, color = "skyblue") +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  xlab("PC1") + ylab("Future wRC+") +
+  theme_minimal() +
+  theme(legend.text = element_text(size = 16, face = "bold"), legend.title = element_blank(),
+        axis.text.x = element_text(size = 16), axis.title.x = element_text(size = 16, face = "bold"),
+        axis.text.y = element_text(size = 16), axis.title.y = element_text(size = 16, face = "bold"),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+```
+
+As denoted by its negative correlation, as PC1 decreases, future wRC+ increases. 
+
+# Feature Selection
+
+With a plethora of features to consider, including the new principal components, we will use machine learning to perform feature selection.
+
+Before we do any model creation, we need to split the data into a training and testing set. The rule of thumb is to do an 80-20 or 75-25 split. It is incredibly important to hold out the test set because this serves as an unbiased estimate of how well our final trained model will generalize in production to new, previously unseen data.
+
+For this model, we only consider seasons with at least 400 past PA and 200 PA because we don't want to punish models for being drastically wrong when a player simply didn't play enough to accumulate a descriptive, accurate wRC+. For example, if we projected a player to have a 100 wRC+ and he wound up with a 200 wRC+ in only 10 plate appearances, it is very likely that this player simply benefited from very limited playing time and that the model may not have been as wrong as any error metric would suggest.
+
+We will perform an 80-20 train-test split and create 5 cross-validation folds for hyperparameter tuning. We opted to use cross-validation folds rather than a single validation set as we are working with a relatively small data frame. This way, every data point is involved in validation at some point and the aggregated average error metric across the 5 folds will provide a more reliable estimate of predictive accuracy than a single validation set would.
+
+```{r}
+# Split the dataset into a training set (60%), testing set (20%), and validation set (20%)
+set.seed(40)
+data_split <- initial_split(predict_batting_qualified, prop = 0.8)
+train <- training(data_split)
+test <- testing(data_split)
+folds <- vfold_cv(train, v = 5)
+```
+
+Lastly, let's tune and fit the model and save a variable importance plot to use for feature selection.
+
+```{r}
+# Create model specification
+spec <- boost_tree(trees = tune(), min_n = tune(), tree_depth = tune(), learn_rate = tune(), sample_size = tune(), mtry = tune()) %>%
+  set_mode("regression") %>%
+  set_engine("xgboost")
+
+num_predictors <- ncol(select(train, -ID, -PlayerId, -MLBAMID, -Name, -Season_future, -PA_future, -wRC_Plus_future))
+mtry_param <- mtry(range = c(1, num_predictors))
+params <- parameters(spec) %>% update(mtry = mtry_param)
+
+# Create model recipe for preprocessing
+rec <- recipe(wRC_Plus_future ~ ., data = train) %>%
+  update_role(ID, PlayerId, MLBAMID, Name, Season_future, PA_future, new_role = "ID")
+
+# Create workflow object
+wf <- workflow() %>%
+  add_model(spec) %>%
+  add_recipe(rec)
+  
+# Hyperparameter tune and validate models using Bayesian optimization
+tune_res <- wf %>%
+  tune_bayes(resamples = folds,
+             initial = 15,
+             iter = 50,
+             param_info = params,
+             control = control_bayes(verbose = TRUE, no_improve = 10, seed = 40),
+             metrics = metric_set(rmse))
+  
+# Select best hyperparameter setting
+best_params <- select_best(tune_res, "rmse")
+  
+# Fit the final model
+set.seed(40)
+final_model <- wf %>%
+  finalize_workflow(best_params) %>%
+  fit(data = train)
+
+# Generate feature importance plot
+vip_plot <- final_model %>% 
+  extract_fit_parsnip() %>% 
+  vip()
+
+vip_plot
+```
+
+The most important features were by far the past 2 year average wRC+ and the 2 year average xwOBA, followed by 2 year average xSLG. We will proceed with the model building phase and test out 3 unique sets of features: (1) the entire feature space, (2) the most important features via variable importance scores, and (3) the principal components alone. The second and third options should not only reduce redundancy in the feature pool, but also reduce model complexity and computational run time, and potentially improving predictive power.
+
+```{r}
+# Select final set of features
+train_selected <- train %>%
+  select(ID, PlayerId, MLBAMID, Name, Season_future, PA_future, wRC_Plus_2YrAvg, est_woba_plus_2YrAvg, est_slg_plus_2YrAvg, wRC_Plus_future)
+
+test_selected <- test %>%
+  select(ID, PlayerId, MLBAMID, Name, Season_future, PA_future, wRC_Plus_2YrAvg, est_woba_plus_2YrAvg, est_slg_plus_2YrAvg, wRC_Plus_future)
+
+train_pca <- train %>%
+  select(ID, PlayerId, MLBAMID, Name, Season_future, PA_future, PC1, PC2, PC3, wRC_Plus_future)
+
+test_pca <- test %>%
+  select(ID, PlayerId, MLBAMID, Name, Season_future, PA_future, PC1, PC2, PC3, wRC_Plus_future)
+
+glimpse(train_selected)
+glimpse(train_pca)
+```
+
+# Null and Naive Model
+
+Before evaluating any advanced machine learning models, we need a performance baseline to determine if significant statistical learning has occurred. We will create this by making both a "null" and a "naive" model. The null model simulates what the error rate would be if we were to just randomly guess future wRC+ before the season starts. The null model achieves this by simply predicting league average wRC+ for every player. The naive model, simulating an educated guess, will use one feature, the 2 year mean of wRC+ for our purposes, and see how well that one feature alone predicts future data points.
+
+```{r}
+# Fit the null model, using the weighted average OBP in train as the prediction
+null_pred <- 100
+
+null_test_preds <- test %>%
+  mutate(.pred = null_pred)
+
+# Calculate testing error
+null_testing_error <- rmse(data = null_test_preds, truth = "wRC_Plus_future", estimate = ".pred")
+
+null_testing_error
+```
+
+There we have it--the number to beat is an RMSE of 26.16. If we cannot craft a model that outperforms this, then no learning has occurred and it is certainly not worth using.
+
+Next, we will fit a naive model with past 2 average wRC+. We anticipate this to outperform the null model enough to be useful. Additionally, we expect this simple model to perform similarly to some of the more complex models as our feature selection process revealed that this was the one of the most important features (wRC_Plus_2YrAvg).
+
+```{r}
+# Fit the naive model, using true talent OBP to predict next season OBP
+naive_test_preds <- test %>%
+  mutate(.pred = wRC_Plus_2YrAvg)
+
+# Calculate testing error
+naive_testing_error <- rmse(data = naive_test_preds, truth = "wRC_Plus_future", estimate = ".pred")
+
+naive_testing_error
+```
+
+As expected, the RMSE error metric improved, lowering from from 26.16 to 23.89. In other words, predicting next season wRC+ goes more smoothly when using wRC+ in past seasons than when randomly guessing or simply predicting league average. Let's fit some more complicated models to see if we can outperform the naive model.
+
+# Hyperparameter Tuning
+
+More complicated models that require hyperparameter tuning will need a validation set to evaluate the quality of each hyperparameter combination. As mentioned previously, because we do not have a lot of data, we will use 5-fold cross-validation for the validation phase.
+
+Now, let's turn to Extreme Gradient Boosting using the xgboost package to try and outperform the naive model. Extreme Gradient Boosting is an extremely powerful supervised learning method for both regression and classification and often outperforms most other machine learning methods when working with tabular data. Again, we will hyperparamter tune with the full set of features, the selected set of features from feature selection, and the principal components alone.
+
+```{r}
+# Create model specification
+spec_xgb <- boost_tree(trees = tune(), min_n = tune(), tree_depth = tune(), learn_rate = tune(), sample_size = tune(), mtry = tune()) %>%
+  set_mode("regression") %>%
+  set_engine("xgboost")
+
+num_predictors <- ncol(select(train, -ID, -PlayerId, -MLBAMID, -Name, -Season_future, -PA_future, -wRC_Plus_future))
+mtry_param <- mtry(range = c(1, num_predictors))
+params <- parameters(spec_xgb) %>% update(mtry = mtry_param)
+
+# Create model recipe for preprocessing
+rec <- recipe(wRC_Plus_future ~ ., data = train) %>%
+  update_role(ID, PlayerId, MLBAMID, Name, Season_future, PA_future, new_role = "ID")
+
+# Create workflow object
+wf_xgb <- workflow() %>%
+  add_model(spec_xgb) %>%
+  add_recipe(rec)
+
+# Hyperparameter tune and validate models using Bayesian optimization
+tune_res_xgb <- wf_xgb %>%
+  tune_bayes(resamples = folds,
+             initial = 15,
+             iter = 50,
+             param_info = params,
+             control = control_bayes(verbose = TRUE, no_improve = 10, seed = 40),
+             metrics = metric_set(rmse))
+
+# Collect validation errors
+xgb_val_error <- tune_res_xgb %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse")
+
+# Select best hyperparameter setting
+best_params_xgb <- select_best(tune_res_xgb, "rmse")
+```
+
+```{r}
+xgb_val_error %>% arrange(mean)
+```
+
+```{r}
+# Create model specification
+spec_xgb_select <- boost_tree(trees = tune(), min_n = tune(), tree_depth = tune(), learn_rate = tune(), sample_size = tune(), mtry = tune()) %>%
+  set_mode("regression") %>%
+  set_engine("xgboost")
+
+num_predictors <- ncol(select(train_selected, -ID, -PlayerId, -MLBAMID, -Name, -Season_future, -PA_future, -wRC_Plus_future))
+mtry_param <- mtry(range = c(1, num_predictors))
+params <- parameters(spec_xgb_select) %>% update(mtry = mtry_param)
+
+# Create model recipe for preprocessing
+rec_select <- recipe(wRC_Plus_future ~ ., data = train_selected) %>%
+  update_role(ID, PlayerId, MLBAMID, Name, Season_future, PA_future, new_role = "ID")
+
+# Create workflow object
+wf_xgb_select <- workflow() %>%
+  add_model(spec_xgb_select) %>%
+  add_recipe(rec_select)
+
+# Hyperparameter tune and validate models using Bayesian optimization
+tune_res_xgb_select <- wf_xgb_select %>%
+  tune_bayes(resamples = folds,
+             initial = 15,
+             iter = 50,
+             param_info = params,
+             control = control_bayes(verbose = TRUE, no_improve = 10, seed = 40),
+             metrics = metric_set(rmse))
+
+# Collect validation errors
+xgb_select_val_error <- tune_res_xgb_select %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse")
+
+# Select best hyperparameter setting
+best_params_xgb_select <- select_best(tune_res_xgb_select, "rmse")
+```
+
+```{r}
+xgb_select_val_error %>% arrange(mean)
+```
+
+```{r}
+# Create model specification
+spec_xgb_pca <- boost_tree(trees = tune(), min_n = tune(), tree_depth = tune(), learn_rate = tune(), sample_size = tune(), mtry = tune()) %>%
+  set_mode("regression") %>%
+  set_engine("xgboost")
+
+num_predictors <- ncol(select(train_pca, -ID, -PlayerId, -MLBAMID, -Name, -Season_future, -PA_future, -wRC_Plus_future))
+mtry_param <- mtry(range = c(1, num_predictors))
+params <- parameters(spec_xgb_select) %>% update(mtry = mtry_param)
+
+# Create model recipe for preprocessing
+rec_pca <- recipe(wRC_Plus_future ~ ., data = train_pca) %>%
+  update_role(ID, PlayerId, MLBAMID, Name, Season_future, PA_future, new_role = "ID")
+
+# Create workflow object
+wf_xgb_pca <- workflow() %>%
+  add_model(spec_xgb_pca) %>%
+  add_recipe(rec_pca)
+
+# Hyperparameter tune and validate models using Bayesian optimization
+tune_res_xgb_pca <- wf_xgb_pca %>%
+  tune_bayes(resamples = folds,
+             initial = 15,
+             iter = 50,
+             param_info = params,
+             control = control_bayes(verbose = TRUE, no_improve = 10, seed = 40),
+             metrics = metric_set(rmse))
+
+# Collect validation errors
+xgb_pca_val_error <- tune_res_xgb_pca %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse")
+
+# Select best hyperparameter setting
+best_params_xgb_pca <- select_best(tune_res_xgb_pca, "rmse")
+```
+
+```{r}
+xgb_pca_val_error %>% arrange(mean)
+```
+
+# Final Model Selection and Evaluation
+
+The average validation errors of all XGBoost models on the 5 cross-validation folds, an estimate of future testing error, were all better than that of the null model (26.16) and the naive model (23.89). It appears the combination of past features provided more signal than past wRC+ alone. Because the XGBoost models had a lower validation error than the naive model, I feel comfortable moving forward with one of them. Of the sets of features, the full set of features performed the best (21.53).
+
+```{r}
+# Visual summary of model performance
+data <- data.frame(
+  Model = c("Null", "Naive", "XGBoost All Features", "XGBoost Selected Features", "XGBoost PCA"),
+  Error = c(26.16, 23.89, 21.53, 22.16, 22.24))
+
+data <- data[order(data$Error), ]
+
+ggplot(data, aes(x = reorder(Model, Error), y = Error)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(x = NULL,
+       y = "RMSE") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip()
+```
+
+Let's go ahead and fit the final model using the tuned hyperparameters and then generate predictions and a corresponding RMSE error rate on the held-out test set data.
+
+```{r}
+# Fit the final model
+set.seed(40)
+final_model <- wf_xgb %>%
+  finalize_workflow(best_params_xgb) %>%
+  fit(data = train)
+
+# Generate predictions on test set
+test_preds <- predict(final_model, test) %>%
+  bind_cols(test) %>%
+  select(ID, PlayerId, Name, PA_future, wRC_Plus_future, .pred)
+
+# Calculate and save testing error
+final_testing_error <- rmse(data = test_preds, truth = "wRC_Plus_future", estimate = ".pred")
+
+final_testing_error
+```
+
+The error rate on the test set is an RMSE of 21.75, very close to the validation error of 21.53. We expect this final model to be off by around 21.75 points of wRC+ when predicting future wRC+.
+
+```{r}
+# Save final model so it can be applied to new data
+saveRDS(final_model, "final_model.rds")
+```
+
+
+# Conclusion
+
+By training a model that performed better than the null and naive models on the test set, I successfully found an adequate function between past offensive performance and future offensive performance. We can now use this model to project player results before the season even starts. Let's take a look at who this model expects to perform the best this upcoming MLB season.
+
+```{r}
+# Restructure data to feed into model
+predict_2024 <- batting_2023 %>%
+  filter(PA >= 300) %>%
+  mutate(Season_future = Season + 1, wRC_Plus_future = NA, PA_future = NA) %>%
+  select(PlayerId, MLBAMID, Name, Season_future, wRC_Plus_future, PA_future) %>%
+  left_join(batting_2023 %>% rename_with(~paste0(., "_past1"), -(1:3)), by = c("PlayerId", "MLBAMID", "Name")) %>%
+  left_join(batting_2023 %>% rename_with(~paste0(., "_past2"), -(1:3)), by = c("PlayerId", "MLBAMID", "Name"))
+```
+
+```{r}
+predict_2024 <- predict_2024 %>%
+  mutate(AVG_Plus_2YrAvg = get_2year_mean(AVG_Plus_past1, PA_past1, AVG_Plus_past2, PA_past2),
+         OBP_Plus_2YrAvg = get_2year_mean(OBP_Plus_past1, PA_past1, OBP_Plus_past2, PA_past2),
+         SLG_Plus_2YrAvg = get_2year_mean(SLG_Plus_past1, PA_past1, SLG_Plus_past2, PA_past2),
+         BB_Rate_Plus_2YrAvg = get_2year_mean(BB_Rate_Plus_past1, PA_past1, BB_Rate_Plus_past2, PA_past2),
+         K_Rate_Plus_2YrAvg = get_2year_mean(K_Rate_Plus_past1, PA_past1, K_Rate_Plus_past2, PA_past2),
+         wRC_Plus_2YrAvg = get_2year_mean(wRC_Plus_past1, PA_past1, wRC_Plus_past2, PA_past2),
+         O_Swing_Rate_2YrAvg = get_2year_mean(O_Swing_Rate_past1, PA_past1, O_Swing_Rate_past2, PA_past2),
+         Z_Swing_Rate_2YrAvg = get_2year_mean(Z_Swing_Rate_past1, PA_past1, Z_Swing_Rate_past2, PA_past2),
+         Swing_Rate_2YrAvg = get_2year_mean(Swing_Rate_past1, PA_past1, Swing_Rate_past2, PA_past2),
+         O_Contact_Rate_2YrAvg = get_2year_mean(O_Contact_Rate_past1, PA_past1, O_Contact_Rate_past2, PA_past2),
+         Z_Contact_Rate_2YrAvg = get_2year_mean(Z_Contact_Rate_past1, PA_past1, Z_Contact_Rate_past2, PA_past2),
+         Contact_Rate_2YrAvg = get_2year_mean(Contact_Rate_past1, PA_past1, Contact_Rate_past2, PA_past2),
+         Pull_Rate_Plus_2YrAvg = get_2year_mean(Pull_Rate_Plus_past1, PA_past1, Pull_Rate_Plus_past2, PA_past2),
+         Cent_Rate_Plus_2YrAvg = get_2year_mean(Cent_Rate_Plus_past1, PA_past1, Cent_Rate_Plus_past2, PA_past2),
+         Oppo_Rate_Plus_2YrAvg = get_2year_mean(Oppo_Rate_Plus_past1, PA_past1, Oppo_Rate_Plus_past2, PA_past2),
+         GB_Rate_Plus_2YrAvg = get_2year_mean(GB_Rate_Plus_past1, PA_past1, GB_Rate_Plus_past2, PA_past2),
+         avg_hit_angle_2YrAvg = get_2year_mean(avg_hit_angle_past1, PA_past1, avg_hit_angle_past2, PA_past2),
+         anglesweetspotpercent_2YrAvg = get_2year_mean(anglesweetspotpercent_past1, PA_past1, anglesweetspotpercent_past2, PA_past2),
+         max_hit_speed_2YrAvg = get_2year_mean(max_hit_speed_past1, PA_past1, max_hit_speed_past2, PA_past2),
+         avg_hit_speed_2YrAvg = get_2year_mean(avg_hit_speed_past1, PA_past1, avg_hit_speed_past2, PA_past2),
+         ev50_2YrAvg = get_2year_mean(ev50_past1, PA_past1, ev50_past2, PA_past2),
+         fbld_2YrAvg = get_2year_mean(fbld_past1, PA_past1, fbld_past2, PA_past2),
+         gb_2YrAvg = get_2year_mean(gb_past1, PA_past1, gb_past2, PA_past2),
+         max_distance_2YrAvg = get_2year_mean(max_distance_past1, PA_past1, max_distance_past2, PA_past2),
+         avg_distance_2YrAvg = get_2year_mean(avg_distance_past1, PA_past1, avg_distance_past2, PA_past2),
+         avg_hr_distance_2YrAvg = get_2year_mean(avg_hr_distance_past1, PA_past1, avg_hr_distance_past2, PA_past2),
+         ev95percent_2YrAvg = get_2year_mean(ev95percent_past1, PA_past1, ev95percent_past2, PA_past2),
+         brl_percent_2YrAvg = get_2year_mean(brl_percent_past1, PA_past1, brl_percent_past2, PA_past2),
+         brl_pa_2YrAvg = get_2year_mean(brl_pa_past1, PA_past1, brl_pa_past2, PA_past2),
+         est_ba_plus_2YrAvg = get_2year_mean(est_ba_plus_past1, PA_past1, est_ba_plus_past2, PA_past2),
+         est_slg_plus_2YrAvg = get_2year_mean(est_slg_plus_past1, PA_past1, est_slg_plus_past2, PA_past2),
+         est_woba_plus_2YrAvg = get_2year_mean(est_woba_plus_past1, PA_past1, est_woba_plus_past2, PA_past2),
+         wOBA_Plus_2YrAvg = get_2year_mean(wOBA_Plus_past1, PA_past1, wOBA_Plus_past2, PA_past2),
+         Z_O_Swing_Rate_2YrAvg = get_2year_mean(Z_O_Swing_Rate_past1, PA_past1, Z_O_Swing_Rate_past2, PA_past2),
+         PA_past1 = ifelse(is.na(PA_past1), 0, PA_past1), PA_past2 = ifelse(is.na(PA_past2), 0, PA_past2), 
+         PA_past_total = PA_past1 + PA_past2)
+
+predict_2024 <- predict_2024 %>% mutate(ID = row_number()) %>% select(ID, everything())
+
+# Calculate PC1
+
+# Standardize the data
+df <- predict_2024 %>%
+  select(-PlayerId, -MLBAMID, -Name, -Season_future, -wRC_Plus_future, -PA_future)
+
+# Separate ID and features
+id_column <- df$ID
+features <- df %>% select(-ID)  # Exclude ID column for PCA
+
+# Standardize the features
+features_standardized <- scale(features[, sapply(features, is.numeric)])
+
+# Apply PCA
+pca_features <- predict(pca_result, features_standardized)
+
+df_pca <- as.data.frame(pca_features[, 1:3])
+
+# Add the ID column back to the PCA features dataframe
+df_pca$ID <- id_column
+
+# Merge PCA features with the original dataframe
+predict_2024 <- merge(predict_2024, df_pca, by = "ID")
+
+# Select final features
+#predict_2024 <- predict_2024 %>%
+  #select(ID, PlayerId, MLBAMID, Name, Season_future, PA_future, PC1, xwOBA_2YrAvg, wRC_Plus_2YrAvg, wRC_Plus_future)
+```
+
+```{r}
+preds_2024 <- predict(final_model, predict_2024) %>%
+  bind_cols(predict_2024) %>%
+  select(ID, PlayerId, Name, PA_future, wRC_Plus_2YrAvg, wRC_Plus_future, .pred)
+```
+
+```{r}
+preds_2024 <- preds_2024 %>%
+  select(Name, wRC_Plus_2YrAvg, .pred) %>%
+  rename(wRC_Plus_predicted = .pred) %>%
+  mutate(wRC_Plus_predicted = round(wRC_Plus_predicted, 0),
+         wRC_Plus_2YrAvg = round(wRC_Plus_2YrAvg, 0)) %>%
+  arrange(desc(wRC_Plus_predicted)) %>%
+  rename(`Predicted wRC+` = wRC_Plus_predicted,
+         `wRC+ Past (2 Year Average)` = wRC_Plus_2YrAvg)
+
+preds_2024
+```
+
+My model predicts that Astros slugger Yordan Alvarez and reigning 2023 MVPs Ronald Acuna Jr. and Shohei Ohtani will be the 3 best hitters of 2024!
+
+# Limitations and Future Work
+
+This model has several pros. Firstly, because it scales all data to league average, it can be used to generate predictions for any season. As we just saw, it was applied to generate predictions for 2024. The same can be done next year to generate predictions for 2025. Additionally, as mentioned before, this final model also outperformed the null and naive models, providing an improved prediction of future performance relative to giving an educated guess.
+
+With that being said, there are also several limitations to this model that could be addressed in future iterations. 
+
+1. Limited Use
+
+This model can only be used for players with a certain amount of past playing time (400 PA). Players with limited playing time and no playing time (rookies) will have to rely on a different method for predictions. These players, intuitively, are harder to generate predictions for because there is less information available about their skill. I propose a system of beginning with a player's performance, and regressing that performance to the league mean depending on how much playing time they have. For example, if a player with 350 past PA has a wRC+ of 130, I would project this player to be an above average hitter, but maybe not a true 130 wRC+ player due to the small sample size. Perhaps the regression technique would drop this player's predicted wRC+ close to 120. If that player had only 10 past PA instead of 350, this prediction would be much closer to league average (100). 
+
+2. Custom Error Metric
+
+I would also like to experiment with a custom error metric: weighted RMSE. The weight of a prediction error should be based on how many plate appearances the player actually played in the predicted season. This was mentioned previously, but if we projected a player to have a 100 wRC+ and he wound up with a 200 wRC+ in only 10 plate appearances, it is very likely that this player simply benefited from very limited playing time and that the model may not have been as wrong as any error metric would suggest. Given more time, I would create a custom weighted RMSE metric for hyperparameter tuning and model performance evaluation.
+
